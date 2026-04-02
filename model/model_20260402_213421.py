@@ -9,19 +9,20 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import FunctionTransformer, RobustScaler
 from xgboost import XGBClassifier
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MODEL_DIR = Path(__file__).resolve().parent
-DATA_PATH = ROOT_DIR / "재무비율" / "재무비율_20260402_205612.csv"
+DATA_PATH = ROOT_DIR / "재무비율" / "모델학습전처리완료_20260403_001717.csv"
 
 TRAIN_RATIO = 0.70
 VALID_RATIO = 0.15
@@ -105,6 +106,50 @@ def infer_feature_columns(dataframe: pd.DataFrame) -> list[str]:
     return inferred_columns
 
 
+def split_feature_columns(feature_columns: list[str]) -> tuple[list[str], list[str]]:
+    base_feature_columns = [column for column in feature_columns if not column.endswith("_missing")]
+    indicator_feature_columns = [column for column in feature_columns if column.endswith("_missing")]
+    return base_feature_columns, indicator_feature_columns
+
+
+def signed_log1p_transform(values: Any) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    return np.sign(array) * np.log1p(np.abs(array))
+
+
+def build_feature_preprocessor(feature_columns: list[str]) -> ColumnTransformer:
+    base_feature_columns, indicator_feature_columns = split_feature_columns(feature_columns)
+
+    # If missing-indicator columns already exist, treat the CSV as preprocessed model input.
+    if indicator_feature_columns:
+        return ColumnTransformer(
+            transformers=[("all_features", "passthrough", feature_columns)],
+            remainder="drop",
+        )
+
+    transformers: list[tuple[str, Any, list[str]]] = []
+
+    if base_feature_columns:
+        transformers.append(
+            (
+                "base_features",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
+                        ("signed_log1p", FunctionTransformer(signed_log1p_transform, validate=False)),
+                        ("scaler", RobustScaler()),
+                    ]
+                ),
+                base_feature_columns,
+            )
+        )
+
+    if indicator_feature_columns:
+        transformers.append(("missing_indicators", "passthrough", indicator_feature_columns))
+
+    return ColumnTransformer(transformers=transformers, remainder="drop")
+
+
 def load_dataset(data_path: Path) -> tuple[pd.DataFrame, pd.Series, list[str]]:
     dataframe = pd.read_csv(data_path, encoding="utf-8-sig")
     feature_columns = infer_feature_columns(dataframe)
@@ -152,16 +197,16 @@ def split_dataset(
     }
 
 
-def build_model_specs(y_train: pd.Series) -> dict[str, Any]:
+def build_model_specs(feature_columns: list[str], y_train: pd.Series) -> dict[str, Any]:
     negative_count = int((y_train == 0).sum())
     positive_count = int((y_train == 1).sum())
     scale_pos_weight = negative_count / positive_count
+    feature_preprocessor = build_feature_preprocessor(feature_columns)
 
     return {
         "logistic_regression": Pipeline(
             steps=[
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
+                ("preprocessor", clone(feature_preprocessor)),
                 (
                     "model",
                     LogisticRegression(
@@ -175,7 +220,7 @@ def build_model_specs(y_train: pd.Series) -> dict[str, Any]:
         ),
         "random_forest": Pipeline(
             steps=[
-                ("imputer", SimpleImputer(strategy="median")),
+                ("preprocessor", clone(feature_preprocessor)),
                 (
                     "model",
                     RandomForestClassifier(
@@ -191,7 +236,7 @@ def build_model_specs(y_train: pd.Series) -> dict[str, Any]:
         ),
         "xgboost": Pipeline(
             steps=[
-                ("imputer", SimpleImputer(strategy="median")),
+                ("preprocessor", clone(feature_preprocessor)),
                 (
                     "model",
                     XGBClassifier(
@@ -363,13 +408,21 @@ def main() -> None:
     x_valid, y_valid = split_data["valid"]
     x_test, y_test = split_data["test"]
 
-    model_specs = build_model_specs(y_train)
+    model_specs = build_model_specs(feature_columns, y_train)
     trained_models: dict[str, Any] = {}
     best_thresholds: dict[str, float] = {}
     metrics_rows: list[dict[str, Any]] = []
 
     print(f"Data path: {args.data_path}")
     print(f"Feature count: {len(feature_columns)}")
+    base_feature_columns, indicator_feature_columns = split_feature_columns(feature_columns)
+    print(f"Base feature count: {len(base_feature_columns)}")
+    print(f"Missing indicator count: {len(indicator_feature_columns)}")
+    print(
+        "Preprocessing mode: external preprocessed input"
+        if indicator_feature_columns
+        else "Preprocessing mode: internal median -> signed log1p -> RobustScaler"
+    )
     print_split_summary(split_data)
 
     for model_name, estimator in model_specs.items():

@@ -12,6 +12,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import RobustScaler
 
 
 getcontext().prec = 40
@@ -725,15 +726,25 @@ def apply_clip_rule(series: pd.Series, rule: tuple[str, float | None, float | No
     return series
 
 
-def save_model_learning_dataset(model_rows: list[dict[str, str]], timestamp: str) -> Path:
+def signed_log1p_series(series: pd.Series) -> pd.Series:
+    return np.sign(series) * np.log1p(np.abs(series))
+
+
+def save_model_learning_datasets(model_rows: list[dict[str, str]], timestamp: str) -> tuple[Path, Path]:
     output_path = OUTPUT_DIR / f"모델학습용_{timestamp}.csv"
+    preprocessed_output_path = OUTPUT_DIR / f"모델학습전처리완료_{timestamp}.csv"
     if not model_rows:
         pd.DataFrame(columns=[*MODEL_IDENTIFIER_COLUMNS, *MODEL_FEATURE_COLUMNS, *MODEL_MISSING_FLAG_COLUMNS, "label"]).to_csv(
             output_path,
             index=False,
             encoding="utf-8-sig",
         )
-        return output_path
+        pd.DataFrame(columns=[*MODEL_IDENTIFIER_COLUMNS, *MODEL_FEATURE_COLUMNS, *MODEL_MISSING_FLAG_COLUMNS, "label"]).to_csv(
+            preprocessed_output_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        return output_path, preprocessed_output_path
 
     dataframe = pd.DataFrame(model_rows)
     for column in MODEL_FEATURE_COLUMNS:
@@ -742,9 +753,21 @@ def save_model_learning_dataset(model_rows: list[dict[str, str]], timestamp: str
         dataframe[column] = apply_clip_rule(dataframe[column], CLIP_RULES[column])
 
     ordered_columns = [*MODEL_IDENTIFIER_COLUMNS, *MODEL_FEATURE_COLUMNS, *MODEL_MISSING_FLAG_COLUMNS, "label"]
-    dataframe = dataframe[ordered_columns]
+    dataframe = dataframe[ordered_columns].copy()
     dataframe.to_csv(output_path, index=False, encoding="utf-8-sig")
-    return output_path
+
+    preprocessed_dataframe = dataframe.copy()
+    for column in MODEL_FEATURE_COLUMNS:
+        median_value = preprocessed_dataframe[column].median(skipna=True)
+        if pd.isna(median_value):
+            median_value = 0.0
+        preprocessed_dataframe[column] = preprocessed_dataframe[column].fillna(median_value)
+        preprocessed_dataframe[column] = signed_log1p_series(preprocessed_dataframe[column].astype(float))
+
+    scaler = RobustScaler()
+    preprocessed_dataframe[MODEL_FEATURE_COLUMNS] = scaler.fit_transform(preprocessed_dataframe[MODEL_FEATURE_COLUMNS])
+    preprocessed_dataframe.to_csv(preprocessed_output_path, index=False, encoding="utf-8-sig")
+    return output_path, preprocessed_output_path
 
 
 def iter_company_dirs(base_dir: Path) -> Iterable[Path]:
@@ -884,7 +907,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def generate_financial_ratio_csv(use_last_year: bool = False) -> tuple[Path, Path]:
+def generate_financial_ratio_csv(use_last_year: bool = False) -> tuple[Path, Path, Path]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     included_records, excluded_codes, total_delisted_rows = read_delisted_records()
@@ -914,14 +937,16 @@ def generate_financial_ratio_csv(use_last_year: bool = False) -> tuple[Path, Pat
             use_last_year=use_last_year,
         )
 
-    model_output_path = save_model_learning_dataset(model_rows, timestamp)
+    model_output_path, preprocessed_model_output_path = save_model_learning_datasets(model_rows, timestamp)
     print(f"상장기업 행 수: {listed_rows}")
     print(f"상폐기업 행 수: {delisted_rows}")
     print(f"총 저장 행 수: {listed_rows + delisted_rows}")
     print(f"모델학습용 저장 경로: {model_output_path}")
+    print(f"모델학습전처리완료 저장 경로: {preprocessed_model_output_path}")
     print("모델학습용 전처리: 분위수 clipping + 결측 flag + 유형/무형/상각비 총자산비율화 적용")
-    print("주의: 결측치 대체와 스케일링은 데이터 누수 방지를 위해 학습 단계에서 별도로 수행하세요.")
-    return output_path, model_output_path
+    print("전처리완료본 추가 적용: 중앙값 결측치 대체 + signed log1p + RobustScaler")
+    print("주의: 전처리완료본은 전체 데이터 기준 적합이므로, 엄밀한 실험은 train split 기준으로 다시 fit 하는 것을 권장합니다.")
+    return output_path, model_output_path, preprocessed_model_output_path
 
 
 def find_latest_output_csv() -> Path:
@@ -1307,7 +1332,9 @@ def main() -> None:
             run_eda(input_csv, eda_output_dir)
             return
 
-        output_csv, _model_output_csv = generate_financial_ratio_csv(use_last_year=args.use_last_year)
+        output_csv, _model_output_csv, _preprocessed_model_output_csv = generate_financial_ratio_csv(
+            use_last_year=args.use_last_year
+        )
         if args.with_eda:
             eda_output_dir = build_eda_output_dir(args.eda_output_dir)
             run_eda(output_csv, eda_output_dir)
