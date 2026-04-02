@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Iterable
+
+import numpy as np
+import pandas as pd
 
 
 getcontext().prec = 40
@@ -67,6 +72,24 @@ OUTPUT_COLUMNS = [
     "종목코드",
     *RATIO_COLUMNS,
     "label",
+]
+
+EDA_CORE_RATIOS = [
+    "총자산증가율",
+    "매출액증가율",
+    "순이익증가율",
+    "매출액순이익률",
+    "자기자본순이익률 (ROE)",
+    "부채비율",
+    "유동비율",
+    "총자본영업이익률",
+]
+
+EDA_SCATTER_PAIRS = [
+    ("자기자본순이익률 (ROE)", "부채비율"),
+    ("매출액순이익률", "유동비율"),
+    ("총자본영업이익률", "차입금의존도"),
+    ("총자본순이익률", "자기자본비율"),
 ]
 
 ZERO_DEFAULT_FIELDS = {
@@ -634,7 +657,37 @@ def process_delisted_companies(writer: csv.DictWriter, included_records: dict[st
     return written_rows
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="재무비율 파이프라인 및 EDA 도구")
+    parser.add_argument(
+        "--with-eda",
+        action="store_true",
+        help="재무비율 CSV 생성 후 바로 EDA를 수행합니다.",
+    )
+    parser.add_argument(
+        "--eda-only",
+        action="store_true",
+        help="파이프라인 계산은 건너뛰고 기존 결과 CSV로 EDA만 수행합니다.",
+    )
+    parser.add_argument(
+        "--input-csv",
+        type=Path,
+        help="EDA 대상 CSV 경로입니다. --eda-only에서 미지정 시 최신 CSV를 사용합니다.",
+    )
+    parser.add_argument(
+        "--eda-output-dir",
+        type=Path,
+        help="EDA 결과 저장 폴더입니다. 미지정 시 재무비율/eda_타임스탬프 를 사용합니다.",
+    )
+    args = parser.parse_args()
+    if args.with_eda and args.eda_only:
+        parser.error("--with-eda 와 --eda-only 는 동시에 사용할 수 없습니다.")
+    if args.input_csv and not args.eda_only:
+        print("[안내] --input-csv 는 --eda-only 에서만 사용됩니다. 현재 값은 무시됩니다.")
+    return args
+
+
+def generate_financial_ratio_csv() -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     included_records, excluded_codes, total_delisted_rows = read_delisted_records()
@@ -656,6 +709,367 @@ def main() -> None:
     print(f"상장기업 행 수: {listed_rows}")
     print(f"상폐기업 행 수: {delisted_rows}")
     print(f"총 저장 행 수: {listed_rows + delisted_rows}")
+    return output_path
+
+
+def find_latest_output_csv() -> Path:
+    candidates = sorted(
+        OUTPUT_DIR.glob("재무비율_*.csv"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"EDA 대상 CSV를 찾지 못했습니다: {OUTPUT_DIR}")
+    return candidates[0]
+
+
+def resolve_eda_input_csv(input_csv: Path | None) -> Path:
+    if input_csv is None:
+        return find_latest_output_csv()
+    return input_csv if input_csv.is_absolute() else (ROOT_DIR / input_csv).resolve()
+
+
+def build_eda_output_dir(eda_output_dir: Path | None) -> Path:
+    if eda_output_dir is not None:
+        path = eda_output_dir if eda_output_dir.is_absolute() else (ROOT_DIR / eda_output_dir).resolve()
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = OUTPUT_DIR / f"eda_{timestamp}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def require_matplotlib():
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "EDA 그래프 생성을 위해 matplotlib 가 필요합니다. 먼저 `python -m pip install matplotlib` 를 실행해주세요."
+        ) from exc
+
+    return plt, font_manager
+
+
+def configure_plot_font(plt, font_manager) -> None:
+    preferred_fonts = [
+        "Malgun Gothic",
+        "AppleGothic",
+        "NanumGothic",
+        "Noto Sans CJK KR",
+        "Noto Sans KR",
+        "DejaVu Sans",
+    ]
+    available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    for font_name in preferred_fonts:
+        if font_name in available_fonts:
+            plt.rcParams["font.family"] = font_name
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+def load_eda_dataframe(csv_path: Path) -> pd.DataFrame:
+    dataframe = pd.read_csv(csv_path, encoding="utf-8-sig")
+    dataframe["연도"] = pd.to_numeric(dataframe["연도"], errors="coerce").astype("Int64")
+    dataframe["label"] = pd.to_numeric(dataframe["label"], errors="coerce").astype("Int64")
+    for column in RATIO_COLUMNS:
+        dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce")
+    return dataframe
+
+
+def clip_series_for_plot(series: pd.Series, lower_quantile: float = 0.01, upper_quantile: float = 0.99) -> pd.Series:
+    valid = series.dropna()
+    if valid.empty:
+        return valid
+    lower = valid.quantile(lower_quantile)
+    upper = valid.quantile(upper_quantile)
+    return valid.clip(lower=lower, upper=upper)
+
+
+def save_overview_summary(dataframe: pd.DataFrame, output_dir: Path) -> None:
+    summary_rows = [
+        {"metric": "total_rows", "value": int(len(dataframe))},
+        {"metric": "unique_companies", "value": int(dataframe["종목코드"].nunique())},
+        {"metric": "year_min", "value": int(dataframe["연도"].min()) if dataframe["연도"].notna().any() else ""},
+        {"metric": "year_max", "value": int(dataframe["연도"].max()) if dataframe["연도"].notna().any() else ""},
+    ]
+    for state, count in dataframe["기업상태"].value_counts(dropna=False).items():
+        summary_rows.append({"metric": f"state_count::{state}", "value": int(count)})
+    for label, count in dataframe["label"].value_counts(dropna=False).sort_index().items():
+        summary_rows.append({"metric": f"label_count::{label}", "value": int(count)})
+    pd.DataFrame(summary_rows).to_csv(output_dir / "summary_overview.csv", index=False, encoding="utf-8-sig")
+
+
+def save_missing_zero_summary(dataframe: pd.DataFrame, output_dir: Path) -> None:
+    summary_rows = []
+    total_rows = len(dataframe)
+    for column in RATIO_COLUMNS:
+        series = dataframe[column]
+        valid = series.dropna()
+        summary_rows.append(
+            {
+                "ratio_name": column,
+                "valid_count": int(valid.shape[0]),
+                "missing_count": int(series.isna().sum()),
+                "missing_rate": float(series.isna().mean()) if total_rows else 0.0,
+                "zero_count": int((valid == 0).sum()),
+                "zero_rate": float((valid == 0).mean()) if not valid.empty else 0.0,
+                "mean": float(valid.mean()) if not valid.empty else np.nan,
+                "median": float(valid.median()) if not valid.empty else np.nan,
+                "std": float(valid.std()) if not valid.empty else np.nan,
+                "min": float(valid.min()) if not valid.empty else np.nan,
+                "max": float(valid.max()) if not valid.empty else np.nan,
+            }
+        )
+    pd.DataFrame(summary_rows).to_csv(output_dir / "summary_missing_zero.csv", index=False, encoding="utf-8-sig")
+
+
+def save_by_label_summary(dataframe: pd.DataFrame, output_dir: Path) -> None:
+    label_zero = dataframe[dataframe["label"] == 0]
+    label_one = dataframe[dataframe["label"] == 1]
+    summary_rows = []
+    for column in RATIO_COLUMNS:
+        series_zero = label_zero[column].dropna()
+        series_one = label_one[column].dropna()
+        summary_rows.append(
+            {
+                "ratio_name": column,
+                "label_0_count": int(series_zero.shape[0]),
+                "label_0_mean": float(series_zero.mean()) if not series_zero.empty else np.nan,
+                "label_0_median": float(series_zero.median()) if not series_zero.empty else np.nan,
+                "label_1_count": int(series_one.shape[0]),
+                "label_1_mean": float(series_one.mean()) if not series_one.empty else np.nan,
+                "label_1_median": float(series_one.median()) if not series_one.empty else np.nan,
+            }
+        )
+    pd.DataFrame(summary_rows).to_csv(output_dir / "summary_by_label.csv", index=False, encoding="utf-8-sig")
+
+
+def plot_label_distribution(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    counts = dataframe["label"].value_counts().sort_index()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar([str(index) for index in counts.index], counts.values, color=["#6baed6", "#ef8a62"])
+    ax.set_title("Label Distribution")
+    ax.set_xlabel("label")
+    ax.set_ylabel("count")
+    for idx, value in enumerate(counts.values):
+        ax.text(idx, value, f"{int(value)}", ha="center", va="bottom")
+    fig.tight_layout()
+    fig.savefig(output_dir / "01_label_distribution.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_state_distribution(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    counts = dataframe["기업상태"].value_counts()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(counts.index.astype(str), counts.values, color=["#4daf4a", "#e41a1c"])
+    ax.set_title("Company State Distribution")
+    ax.set_xlabel("기업상태")
+    ax.set_ylabel("count")
+    for idx, value in enumerate(counts.values):
+        ax.text(idx, value, f"{int(value)}", ha="center", va="bottom")
+    fig.tight_layout()
+    fig.savefig(output_dir / "02_state_distribution.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_yearly_state_counts(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    pivot = dataframe.pivot_table(index="연도", columns="기업상태", values="종목코드", aggfunc="count", fill_value=0).sort_index()
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bottom = np.zeros(len(pivot))
+    colors = ["#4daf4a", "#e41a1c", "#377eb8", "#984ea3"]
+    for idx, column in enumerate(pivot.columns):
+        values = pivot[column].to_numpy()
+        ax.bar(pivot.index.astype(str), values, bottom=bottom, label=column, color=colors[idx % len(colors)])
+        bottom = bottom + values
+    ax.set_title("Yearly Counts by Company State")
+    ax.set_xlabel("연도")
+    ax.set_ylabel("count")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / "03_yearly_state_counts.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_yearly_label_counts(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    pivot = dataframe.pivot_table(index="연도", columns="label", values="종목코드", aggfunc="count", fill_value=0).sort_index()
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bottom = np.zeros(len(pivot))
+    colors = ["#6baed6", "#ef8a62", "#807dba"]
+    for idx, column in enumerate(pivot.columns):
+        values = pivot[column].to_numpy()
+        ax.bar(pivot.index.astype(str), values, bottom=bottom, label=f"label={column}", color=colors[idx % len(colors)])
+        bottom = bottom + values
+    ax.set_title("Yearly Counts by Label")
+    ax.set_xlabel("연도")
+    ax.set_ylabel("count")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / "04_yearly_label_counts.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_missing_zero_rates(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    missing_rates = dataframe[RATIO_COLUMNS].isna().mean().sort_values(ascending=False)
+    zero_rates = dataframe[RATIO_COLUMNS].apply(lambda col: (col.dropna() == 0).mean() if col.dropna().shape[0] else 0.0).sort_values(ascending=False)
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.barh(missing_rates.index[::-1], missing_rates.values[::-1], color="#9ecae1")
+    ax.set_title("Missing Rate by Ratio")
+    ax.set_xlabel("missing rate")
+    fig.tight_layout()
+    fig.savefig(output_dir / "05_missing_rate_top30.png", dpi=200)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.barh(zero_rates.index[::-1], zero_rates.values[::-1], color="#fdae6b")
+    ax.set_title("Zero Rate by Ratio")
+    ax.set_xlabel("zero rate")
+    fig.tight_layout()
+    fig.savefig(output_dir / "06_zero_rate_top30.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_correlation_heatmap(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    correlation = dataframe[RATIO_COLUMNS].corr()
+    fig, ax = plt.subplots(figsize=(16, 14))
+    image = ax.imshow(correlation.to_numpy(), cmap="coolwarm", vmin=-1, vmax=1)
+    ax.set_xticks(range(len(correlation.columns)))
+    ax.set_xticklabels(correlation.columns, rotation=90)
+    ax.set_yticks(range(len(correlation.index)))
+    ax.set_yticklabels(correlation.index)
+    ax.set_title("Correlation Heatmap")
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(output_dir / "07_correlation_heatmap.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_boxplots_by_label(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    fig, axes = plt.subplots(4, 2, figsize=(14, 18))
+    axes = axes.flatten()
+    label_zero = dataframe[dataframe["label"] == 0]
+    label_one = dataframe[dataframe["label"] == 1]
+
+    for ax, column in zip(axes, EDA_CORE_RATIOS):
+        series_zero = clip_series_for_plot(label_zero[column])
+        series_one = clip_series_for_plot(label_one[column])
+        data = [series_zero.to_numpy(), series_one.to_numpy()]
+        ax.boxplot(data, labels=["label=0", "label=1"], showfliers=False)
+        ax.set_title(column)
+        ax.grid(axis="y", alpha=0.25)
+
+    fig.suptitle("Core Ratio Boxplots by Label", fontsize=16)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(output_dir / "08_boxplots_by_label.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_histograms_core_ratios(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    fig, axes = plt.subplots(4, 2, figsize=(14, 18))
+    axes = axes.flatten()
+    for ax, column in zip(axes, EDA_CORE_RATIOS):
+        series_zero = clip_series_for_plot(dataframe.loc[dataframe["label"] == 0, column])
+        series_one = clip_series_for_plot(dataframe.loc[dataframe["label"] == 1, column])
+        if not series_zero.empty:
+            ax.hist(series_zero, bins=30, alpha=0.55, label="label=0", color="#6baed6")
+        if not series_one.empty:
+            ax.hist(series_one, bins=30, alpha=0.55, label="label=1", color="#ef8a62")
+        ax.set_title(column)
+        ax.legend()
+        ax.grid(axis="y", alpha=0.25)
+
+    fig.suptitle("Core Ratio Histograms", fontsize=16)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(output_dir / "09_histograms_core_ratios.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_scatter_pairs(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    axes = axes.flatten()
+    color_map = {0: "#6baed6", 1: "#ef8a62"}
+
+    for ax, (x_col, y_col) in zip(axes, EDA_SCATTER_PAIRS):
+        plot_df = dataframe[[x_col, y_col, "label"]].dropna().copy()
+        if plot_df.empty:
+            ax.set_title(f"{x_col} vs {y_col}")
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        plot_df[x_col] = clip_series_for_plot(plot_df[x_col]).reindex(plot_df.index)
+        plot_df[y_col] = clip_series_for_plot(plot_df[y_col]).reindex(plot_df.index)
+        plot_df = plot_df.dropna()
+
+        for label_value in sorted(plot_df["label"].dropna().unique()):
+            label_slice = plot_df[plot_df["label"] == label_value]
+            ax.scatter(
+                label_slice[x_col],
+                label_slice[y_col],
+                s=14,
+                alpha=0.35,
+                color=color_map.get(int(label_value), "#999999"),
+                label=f"label={int(label_value)}",
+            )
+
+        ax.set_title(f"{x_col} vs {y_col}")
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(y_col)
+        ax.legend()
+        ax.grid(alpha=0.25)
+
+    fig.suptitle("Profitability vs Stability Scatter Plots", fontsize=16)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(output_dir / "10_scatter_profitability_vs_stability.png", dpi=200)
+    plt.close(fig)
+
+
+def run_eda(csv_path: Path, eda_output_dir: Path) -> None:
+    plt, font_manager = require_matplotlib()
+    configure_plot_font(plt, font_manager)
+
+    print(f"EDA 입력 CSV: {csv_path}")
+    print(f"EDA 저장 폴더: {eda_output_dir}")
+
+    dataframe = load_eda_dataframe(csv_path)
+
+    save_overview_summary(dataframe, eda_output_dir)
+    save_missing_zero_summary(dataframe, eda_output_dir)
+    save_by_label_summary(dataframe, eda_output_dir)
+
+    plot_label_distribution(dataframe, eda_output_dir, plt)
+    plot_state_distribution(dataframe, eda_output_dir, plt)
+    plot_yearly_state_counts(dataframe, eda_output_dir, plt)
+    plot_yearly_label_counts(dataframe, eda_output_dir, plt)
+    plot_missing_zero_rates(dataframe, eda_output_dir, plt)
+    plot_correlation_heatmap(dataframe, eda_output_dir, plt)
+    plot_boxplots_by_label(dataframe, eda_output_dir, plt)
+    plot_histograms_core_ratios(dataframe, eda_output_dir, plt)
+    plot_scatter_pairs(dataframe, eda_output_dir, plt)
+
+    print("EDA 요약 CSV 3개와 PNG 그래프 10개 저장이 완료되었습니다.")
+
+
+def main() -> None:
+    args = parse_args()
+
+    try:
+        if args.eda_only:
+            input_csv = resolve_eda_input_csv(args.input_csv)
+            eda_output_dir = build_eda_output_dir(args.eda_output_dir)
+            run_eda(input_csv, eda_output_dir)
+            return
+
+        output_csv = generate_financial_ratio_csv()
+        if args.with_eda:
+            eda_output_dir = build_eda_output_dir(args.eda_output_dir)
+            run_eda(output_csv, eda_output_dir)
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"[오류] {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
