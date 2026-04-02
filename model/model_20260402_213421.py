@@ -30,7 +30,8 @@ RANDOM_STATE = 42
 BEST_MODEL_METRIC = "f1"
 THRESHOLD_GRID = np.linspace(0.05, 0.95, 181)
 
-FEATURE_COLUMNS = [
+METADATA_COLUMNS = ["기업상태", "기업명", "기업코드", "연도", "종목코드"]
+DEFAULT_FEATURE_COLUMNS = [
     "총자산증가율",
     "유동자산증가율",
     "매출액증가율",
@@ -82,18 +83,41 @@ def validate_ratios(train_ratio: float, valid_ratio: float, test_ratio: float) -
         raise ValueError(f"train/validation/test 비율 합은 1이어야 합니다. 현재 합계: {ratio_sum:.6f}")
 
 
-def load_dataset(data_path: Path) -> tuple[pd.DataFrame, pd.Series]:
+def infer_feature_columns(dataframe: pd.DataFrame) -> list[str]:
+    if all(column in dataframe.columns for column in DEFAULT_FEATURE_COLUMNS):
+        if any(column.endswith("_missing") for column in dataframe.columns):
+            inferred_columns = [
+                column
+                for column in dataframe.columns
+                if column not in METADATA_COLUMNS and column != LABEL_COLUMN
+            ]
+            if inferred_columns:
+                return inferred_columns
+        return DEFAULT_FEATURE_COLUMNS
+
+    inferred_columns = [
+        column
+        for column in dataframe.columns
+        if column not in METADATA_COLUMNS and column != LABEL_COLUMN
+    ]
+    if not inferred_columns:
+        raise KeyError("CSV에서 학습에 사용할 feature 컬럼을 찾지 못했습니다.")
+    return inferred_columns
+
+
+def load_dataset(data_path: Path) -> tuple[pd.DataFrame, pd.Series, list[str]]:
     dataframe = pd.read_csv(data_path, encoding="utf-8-sig")
-    missing_columns = [column for column in FEATURE_COLUMNS + [LABEL_COLUMN] if column not in dataframe.columns]
+    feature_columns = infer_feature_columns(dataframe)
+    missing_columns = [column for column in feature_columns + [LABEL_COLUMN] if column not in dataframe.columns]
     if missing_columns:
         raise KeyError(f"CSV에 필요한 컬럼이 없습니다: {missing_columns}")
 
-    dataset = dataframe[FEATURE_COLUMNS + [LABEL_COLUMN]].copy()
-    dataset[FEATURE_COLUMNS] = dataset[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    dataset = dataframe[feature_columns + [LABEL_COLUMN]].copy()
+    dataset[feature_columns] = dataset[feature_columns].apply(pd.to_numeric, errors="coerce")
     dataset[LABEL_COLUMN] = pd.to_numeric(dataset[LABEL_COLUMN], errors="coerce")
     dataset = dataset.dropna(subset=[LABEL_COLUMN]).copy()
     dataset[LABEL_COLUMN] = dataset[LABEL_COLUMN].astype(int)
-    return dataset[FEATURE_COLUMNS], dataset[LABEL_COLUMN]
+    return dataset[feature_columns], dataset[LABEL_COLUMN], feature_columns
 
 
 def split_dataset(
@@ -300,6 +324,7 @@ def save_outputs(
     best_estimator: Any,
     best_threshold: float,
     data_path: Path,
+    feature_columns: list[str],
 ) -> tuple[Path, Path]:
     metrics_output_path = MODEL_DIR / f"metrics_threshold_tuned_{timestamp}.csv"
     model_output_path = MODEL_DIR / f"best_model_threshold_tuned_{best_model_name}_{timestamp}.joblib"
@@ -310,7 +335,7 @@ def save_outputs(
             "model_name": best_model_name,
             "estimator": best_estimator,
             "threshold": best_threshold,
-            "feature_columns": FEATURE_COLUMNS,
+            "feature_columns": feature_columns,
             "label_column": LABEL_COLUMN,
             "best_metric": BEST_MODEL_METRIC,
             "data_path": str(data_path),
@@ -325,7 +350,7 @@ def main() -> None:
     args = parse_args()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    x_data, y_data = load_dataset(args.data_path)
+    x_data, y_data, feature_columns = load_dataset(args.data_path)
     split_data = split_dataset(
         x_data=x_data,
         y_data=y_data,
@@ -344,7 +369,7 @@ def main() -> None:
     metrics_rows: list[dict[str, Any]] = []
 
     print(f"Data path: {args.data_path}")
-    print(f"Feature count: {len(FEATURE_COLUMNS)}")
+    print(f"Feature count: {len(feature_columns)}")
     print_split_summary(split_data)
 
     for model_name, estimator in model_specs.items():
@@ -378,6 +403,7 @@ def main() -> None:
         best_estimator=best_estimator,
         best_threshold=best_threshold,
         data_path=args.data_path,
+        feature_columns=feature_columns,
     )
 
     print(f"Best model ({BEST_MODEL_METRIC} 기준): {best_model_name}")

@@ -74,6 +74,82 @@ OUTPUT_COLUMNS = [
     "label",
 ]
 
+MODEL_IDENTIFIER_COLUMNS = [
+    "기업상태",
+    "기업명",
+    "기업코드",
+    "연도",
+    "종목코드",
+]
+
+MODEL_FEATURE_COLUMNS = [
+    "총자산증가율",
+    "유동자산증가율",
+    "매출액증가율",
+    "순이익증가율",
+    "영업이익증가율",
+    "매출액순이익률",
+    "매출총이익률",
+    "자기자본순이익률 (ROE)",
+    "매출채권회전율",
+    "재고자산회전율",
+    "총자본회전율",
+    "유형자산회전율",
+    "매출원가율",
+    "부채비율",
+    "유동비율",
+    "자기자본비율",
+    "당좌비율",
+    "비유동자산장기적합률",
+    "순운전자본비율",
+    "차입금의존도",
+    "현금비율",
+    "유형자산_총자산비율",
+    "무형자산_총자산비율",
+    "무형자산상각비_총자산비율",
+    "유형자산상각비_총자산비율",
+    "감가상각비_총자산비율",
+    "총자본영업이익률",
+    "총자본순이익률",
+    "유보액/납입자본비율",
+    "총자본투자효율",
+]
+
+MODEL_MISSING_FLAG_COLUMNS = [f"{column}_missing" for column in MODEL_FEATURE_COLUMNS]
+
+CLIP_RULES = {
+    "총자산증가율": ("both", 0.01, 0.99),
+    "유동자산증가율": ("both", 0.01, 0.99),
+    "매출액증가율": ("both", 0.01, 0.99),
+    "순이익증가율": ("both", 0.005, 0.995),
+    "영업이익증가율": ("both", 0.005, 0.995),
+    "매출액순이익률": ("both", 0.01, 0.99),
+    "매출총이익률": ("both", 0.01, 0.99),
+    "자기자본순이익률 (ROE)": ("both", 0.005, 0.995),
+    "매출채권회전율": ("upper", None, 0.99),
+    "재고자산회전율": ("upper", None, 0.99),
+    "총자본회전율": ("both", 0.01, 0.99),
+    "유형자산회전율": ("both", 0.01, 0.99),
+    "매출원가율": ("both", 0.01, 0.99),
+    "부채비율": ("upper", None, 0.99),
+    "유동비율": ("upper", None, 0.99),
+    "자기자본비율": ("both", 0.01, 0.99),
+    "당좌비율": ("upper", None, 0.99),
+    "비유동자산장기적합률": ("upper", None, 0.995),
+    "순운전자본비율": ("both", 0.01, 0.99),
+    "차입금의존도": ("upper", None, 0.99),
+    "현금비율": ("upper", None, 0.995),
+    "유형자산_총자산비율": ("upper", None, 0.99),
+    "무형자산_총자산비율": ("upper", None, 0.99),
+    "무형자산상각비_총자산비율": ("upper", None, 0.99),
+    "유형자산상각비_총자산비율": ("upper", None, 0.99),
+    "감가상각비_총자산비율": ("upper", None, 0.99),
+    "총자본영업이익률": ("both", 0.01, 0.99),
+    "총자본순이익률": ("both", 0.01, 0.99),
+    "유보액/납입자본비율": ("both", 0.005, 0.995),
+    "총자본투자효율": ("both", 0.01, 0.99),
+}
+
 EDA_CORE_RATIOS = [
     "총자산증가율",
     "매출액증가율",
@@ -573,11 +649,109 @@ def row_has_meaningful_ratio(row: dict[str, str]) -> bool:
     return False
 
 
+def build_model_base_row(raw_row: dict[str, str], current_fields: dict[str, Decimal | None]) -> dict[str, str]:
+    total_assets = current_fields.get("assets")
+    row = {column: raw_row[column] for column in MODEL_IDENTIFIER_COLUMNS}
+
+    for column in MODEL_FEATURE_COLUMNS:
+        row[column] = ""
+
+    for column in [
+        "총자산증가율",
+        "유동자산증가율",
+        "매출액증가율",
+        "순이익증가율",
+        "영업이익증가율",
+        "매출액순이익률",
+        "매출총이익률",
+        "자기자본순이익률 (ROE)",
+        "매출채권회전율",
+        "재고자산회전율",
+        "총자본회전율",
+        "유형자산회전율",
+        "매출원가율",
+        "부채비율",
+        "유동비율",
+        "자기자본비율",
+        "당좌비율",
+        "비유동자산장기적합률",
+        "순운전자본비율",
+        "차입금의존도",
+        "현금비율",
+        "총자본영업이익률",
+        "총자본순이익률",
+        "유보액/납입자본비율",
+        "총자본투자효율",
+    ]:
+        row[column] = raw_row.get(column, "")
+
+    row["유형자산_총자산비율"] = format_decimal(
+        safe_divide(current_fields.get("property_plant_equipment"), total_assets, Decimal("100"))
+    )
+    row["무형자산_총자산비율"] = format_decimal(
+        safe_divide(current_fields.get("intangible_assets"), total_assets, Decimal("100"))
+    )
+    row["무형자산상각비_총자산비율"] = format_decimal(
+        safe_divide(current_fields.get("intangible_amortization"), total_assets, Decimal("100"))
+    )
+    row["유형자산상각비_총자산비율"] = format_decimal(
+        safe_divide(current_fields.get("tangible_depreciation"), total_assets, Decimal("100"))
+    )
+    depreciation_total = None
+    if current_fields.get("intangible_amortization") is not None and current_fields.get("tangible_depreciation") is not None:
+        depreciation_total = current_fields["intangible_amortization"] + current_fields["tangible_depreciation"]
+    row["감가상각비_총자산비율"] = format_decimal(
+        safe_divide(depreciation_total, total_assets, Decimal("100"))
+    )
+    row["label"] = raw_row["label"]
+    return row
+
+
+def apply_clip_rule(series: pd.Series, rule: tuple[str, float | None, float | None]) -> pd.Series:
+    valid = series.dropna()
+    if valid.empty:
+        return series
+
+    mode, lower_q, upper_q = rule
+    lower = valid.quantile(lower_q) if lower_q is not None else None
+    upper = valid.quantile(upper_q) if upper_q is not None else None
+
+    if mode == "both" and lower is not None and upper is not None:
+        return series.clip(lower=lower, upper=upper)
+    if mode == "upper" and upper is not None:
+        return series.clip(upper=upper)
+    if mode == "lower" and lower is not None:
+        return series.clip(lower=lower)
+    return series
+
+
+def save_model_learning_dataset(model_rows: list[dict[str, str]], timestamp: str) -> Path:
+    output_path = OUTPUT_DIR / f"모델학습용_{timestamp}.csv"
+    if not model_rows:
+        pd.DataFrame(columns=[*MODEL_IDENTIFIER_COLUMNS, *MODEL_FEATURE_COLUMNS, *MODEL_MISSING_FLAG_COLUMNS, "label"]).to_csv(
+            output_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        return output_path
+
+    dataframe = pd.DataFrame(model_rows)
+    for column in MODEL_FEATURE_COLUMNS:
+        dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce")
+        dataframe[f"{column}_missing"] = dataframe[column].isna().astype(int)
+        dataframe[column] = apply_clip_rule(dataframe[column], CLIP_RULES[column])
+
+    ordered_columns = [*MODEL_IDENTIFIER_COLUMNS, *MODEL_FEATURE_COLUMNS, *MODEL_MISSING_FLAG_COLUMNS, "label"]
+    dataframe = dataframe[ordered_columns]
+    dataframe.to_csv(output_path, index=False, encoding="utf-8-sig")
+    return output_path
+
+
 def iter_company_dirs(base_dir: Path) -> Iterable[Path]:
     return sorted((path for path in base_dir.iterdir() if path.is_dir()), key=lambda item: item.name)
 
 
-def process_listed_companies(writer: csv.DictWriter) -> int:
+def process_listed_companies(writer: csv.DictWriter, model_rows: list[dict[str, str]]) -> int:
     written_rows = 0
     for index, company_dir in enumerate(iter_company_dirs(LISTED_DIR), start=1):
         year_map = load_company_year_map(company_dir)
@@ -599,6 +773,7 @@ def process_listed_companies(writer: csv.DictWriter) -> int:
             )
             if row_has_meaningful_ratio(row):
                 writer.writerow(row)
+                model_rows.append(build_model_base_row(row, current["fields"]))
                 written_rows += 1
 
         if index % 100 == 0:
@@ -624,6 +799,7 @@ def process_delisted_companies(
     writer: csv.DictWriter,
     included_records: dict[str, DelistedRecord],
     excluded_codes: set[str],
+    model_rows: list[dict[str, str]],
     use_last_year: bool = False,
 ) -> int:
     written_rows = 0
@@ -663,6 +839,7 @@ def process_delisted_companies(
             )
             if row_has_meaningful_ratio(row):
                 writer.writerow(row)
+                model_rows.append(build_model_base_row(row, current["fields"]))
                 written_rows += 1
 
         if index % 50 == 0:
@@ -707,12 +884,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def generate_financial_ratio_csv(use_last_year: bool = False) -> Path:
+def generate_financial_ratio_csv(use_last_year: bool = False) -> tuple[Path, Path]:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     included_records, excluded_codes, total_delisted_rows = read_delisted_records()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = OUTPUT_DIR / f"재무비율_{timestamp}.csv"
+    model_rows: list[dict[str, str]] = []
 
     print(f"원본 상폐 CSV 행 수: {total_delisted_rows}")
     print(f"필터링으로 제외된 상폐 종목 수: {len(excluded_codes)}")
@@ -727,18 +905,23 @@ def generate_financial_ratio_csv(use_last_year: bool = False) -> Path:
         writer = csv.DictWriter(output_file, fieldnames=OUTPUT_COLUMNS)
         writer.writeheader()
 
-        listed_rows = process_listed_companies(writer)
+        listed_rows = process_listed_companies(writer, model_rows)
         delisted_rows = process_delisted_companies(
             writer,
             included_records,
             excluded_codes,
+            model_rows,
             use_last_year=use_last_year,
         )
 
+    model_output_path = save_model_learning_dataset(model_rows, timestamp)
     print(f"상장기업 행 수: {listed_rows}")
     print(f"상폐기업 행 수: {delisted_rows}")
     print(f"총 저장 행 수: {listed_rows + delisted_rows}")
-    return output_path
+    print(f"모델학습용 저장 경로: {model_output_path}")
+    print("모델학습용 전처리: 분위수 clipping + 결측 flag + 유형/무형/상각비 총자산비율화 적용")
+    print("주의: 결측치 대체와 스케일링은 데이터 누수 방지를 위해 학습 단계에서 별도로 수행하세요.")
+    return output_path, model_output_path
 
 
 def find_latest_output_csv() -> Path:
@@ -1124,7 +1307,7 @@ def main() -> None:
             run_eda(input_csv, eda_output_dir)
             return
 
-        output_csv = generate_financial_ratio_csv(use_last_year=args.use_last_year)
+        output_csv, _model_output_csv = generate_financial_ratio_csv(use_last_year=args.use_last_year)
         if args.with_eda:
             eda_output_dir = build_eda_output_dir(args.eda_output_dir)
             run_eda(output_csv, eda_output_dir)
