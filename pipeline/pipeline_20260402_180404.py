@@ -739,22 +739,23 @@ def build_eda_output_dir(eda_output_dir: Path | None) -> Path:
     return path
 
 
-def require_matplotlib():
+def require_plot_libraries():
     try:
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib import font_manager
+        import seaborn as sns
     except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "EDA 그래프 생성을 위해 matplotlib 가 필요합니다. 먼저 `python -m pip install matplotlib` 를 실행해주세요."
+            "EDA 그래프 생성을 위해 seaborn 이 필요합니다. 먼저 `python -m pip install seaborn` 를 실행해주세요."
         ) from exc
 
-    return plt, font_manager
+    return plt, font_manager, sns
 
 
-def configure_plot_font(plt, font_manager) -> None:
+def configure_plot_font(plt, font_manager, sns) -> None:
     preferred_fonts = [
         "Malgun Gothic",
         "AppleGothic",
@@ -764,10 +765,23 @@ def configure_plot_font(plt, font_manager) -> None:
         "DejaVu Sans",
     ]
     available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    selected_font = "DejaVu Sans"
     for font_name in preferred_fonts:
         if font_name in available_fonts:
-            plt.rcParams["font.family"] = font_name
+            selected_font = font_name
             break
+
+    sns.set_theme(
+        style="whitegrid",
+        context="talk",
+        rc={
+            "font.family": selected_font,
+            "font.sans-serif": [selected_font, "Malgun Gothic", "NanumGothic", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+        },
+    )
+    plt.rcParams["font.family"] = selected_font
+    plt.rcParams["font.sans-serif"] = [selected_font, "Malgun Gothic", "NanumGothic", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -848,84 +862,98 @@ def save_by_label_summary(dataframe: pd.DataFrame, output_dir: Path) -> None:
     pd.DataFrame(summary_rows).to_csv(output_dir / "summary_by_label.csv", index=False, encoding="utf-8-sig")
 
 
-def plot_label_distribution(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
-    counts = dataframe["label"].value_counts().sort_index()
+def plot_label_distribution(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar([str(index) for index in counts.index], counts.values, color=["#6baed6", "#ef8a62"])
+    plot_df = dataframe.copy()
+    plot_df["label_str"] = plot_df["label"].astype(str)
+    sns.countplot(data=plot_df, x="label_str", order=sorted(plot_df["label_str"].dropna().unique()), palette="Blues", ax=ax)
     ax.set_title("Label Distribution")
     ax.set_xlabel("label")
     ax.set_ylabel("count")
-    for idx, value in enumerate(counts.values):
+    for idx, patch in enumerate(ax.patches):
+        value = patch.get_height()
         ax.text(idx, value, f"{int(value)}", ha="center", va="bottom")
     fig.tight_layout()
     fig.savefig(output_dir / "01_label_distribution.png", dpi=200)
     plt.close(fig)
 
 
-def plot_state_distribution(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
-    counts = dataframe["기업상태"].value_counts()
+def plot_state_distribution(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(counts.index.astype(str), counts.values, color=["#4daf4a", "#e41a1c"])
+    order = dataframe["기업상태"].value_counts().index.tolist()
+    sns.countplot(data=dataframe, x="기업상태", order=order, palette="Set2", ax=ax)
     ax.set_title("Company State Distribution")
     ax.set_xlabel("기업상태")
     ax.set_ylabel("count")
-    for idx, value in enumerate(counts.values):
+    for idx, patch in enumerate(ax.patches):
+        value = patch.get_height()
         ax.text(idx, value, f"{int(value)}", ha="center", va="bottom")
     fig.tight_layout()
     fig.savefig(output_dir / "02_state_distribution.png", dpi=200)
     plt.close(fig)
 
 
-def plot_yearly_state_counts(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
-    pivot = dataframe.pivot_table(index="연도", columns="기업상태", values="종목코드", aggfunc="count", fill_value=0).sort_index()
+def plot_yearly_state_counts(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, ax = plt.subplots(figsize=(12, 6))
-    bottom = np.zeros(len(pivot))
-    colors = ["#4daf4a", "#e41a1c", "#377eb8", "#984ea3"]
-    for idx, column in enumerate(pivot.columns):
-        values = pivot[column].to_numpy()
-        ax.bar(pivot.index.astype(str), values, bottom=bottom, label=column, color=colors[idx % len(colors)])
-        bottom = bottom + values
+    plot_df = dataframe.dropna(subset=["연도"]).copy()
+    plot_df["연도_str"] = plot_df["연도"].astype(int).astype(str)
+    sns.histplot(
+        data=plot_df,
+        x="연도_str",
+        hue="기업상태",
+        multiple="stack",
+        discrete=True,
+        shrink=0.85,
+        palette="Set2",
+        ax=ax,
+    )
     ax.set_title("Yearly Counts by Company State")
     ax.set_xlabel("연도")
     ax.set_ylabel("count")
-    ax.legend()
     fig.tight_layout()
     fig.savefig(output_dir / "03_yearly_state_counts.png", dpi=200)
     plt.close(fig)
 
 
-def plot_yearly_label_counts(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
-    pivot = dataframe.pivot_table(index="연도", columns="label", values="종목코드", aggfunc="count", fill_value=0).sort_index()
+def plot_yearly_label_counts(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, ax = plt.subplots(figsize=(12, 6))
-    bottom = np.zeros(len(pivot))
-    colors = ["#6baed6", "#ef8a62", "#807dba"]
-    for idx, column in enumerate(pivot.columns):
-        values = pivot[column].to_numpy()
-        ax.bar(pivot.index.astype(str), values, bottom=bottom, label=f"label={column}", color=colors[idx % len(colors)])
-        bottom = bottom + values
+    plot_df = dataframe.dropna(subset=["연도", "label"]).copy()
+    plot_df["연도_str"] = plot_df["연도"].astype(int).astype(str)
+    plot_df["label_str"] = plot_df["label"].astype(int).astype(str)
+    sns.histplot(
+        data=plot_df,
+        x="연도_str",
+        hue="label_str",
+        multiple="stack",
+        discrete=True,
+        shrink=0.85,
+        palette="coolwarm",
+        ax=ax,
+    )
     ax.set_title("Yearly Counts by Label")
     ax.set_xlabel("연도")
     ax.set_ylabel("count")
-    ax.legend()
     fig.tight_layout()
     fig.savefig(output_dir / "04_yearly_label_counts.png", dpi=200)
     plt.close(fig)
 
 
-def plot_missing_zero_rates(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+def plot_missing_zero_rates(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     missing_rates = dataframe[RATIO_COLUMNS].isna().mean().sort_values(ascending=False)
     zero_rates = dataframe[RATIO_COLUMNS].apply(lambda col: (col.dropna() == 0).mean() if col.dropna().shape[0] else 0.0).sort_values(ascending=False)
 
+    missing_df = pd.DataFrame({"ratio_name": missing_rates.index, "rate": missing_rates.values})
     fig, ax = plt.subplots(figsize=(14, 8))
-    ax.barh(missing_rates.index[::-1], missing_rates.values[::-1], color="#9ecae1")
+    sns.barplot(data=missing_df, x="rate", y="ratio_name", palette="Blues_r", ax=ax)
     ax.set_title("Missing Rate by Ratio")
     ax.set_xlabel("missing rate")
     fig.tight_layout()
     fig.savefig(output_dir / "05_missing_rate_top30.png", dpi=200)
     plt.close(fig)
 
+    zero_df = pd.DataFrame({"ratio_name": zero_rates.index, "rate": zero_rates.values})
     fig, ax = plt.subplots(figsize=(14, 8))
-    ax.barh(zero_rates.index[::-1], zero_rates.values[::-1], color="#fdae6b")
+    sns.barplot(data=zero_df, x="rate", y="ratio_name", palette="Oranges_r", ax=ax)
     ax.set_title("Zero Rate by Ratio")
     ax.set_xlabel("zero rate")
     fig.tight_layout()
@@ -933,32 +961,26 @@ def plot_missing_zero_rates(dataframe: pd.DataFrame, output_dir: Path, plt) -> N
     plt.close(fig)
 
 
-def plot_correlation_heatmap(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+def plot_correlation_heatmap(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     correlation = dataframe[RATIO_COLUMNS].corr()
     fig, ax = plt.subplots(figsize=(16, 14))
-    image = ax.imshow(correlation.to_numpy(), cmap="coolwarm", vmin=-1, vmax=1)
-    ax.set_xticks(range(len(correlation.columns)))
-    ax.set_xticklabels(correlation.columns, rotation=90)
-    ax.set_yticks(range(len(correlation.index)))
-    ax.set_yticklabels(correlation.index)
+    sns.heatmap(correlation, cmap="coolwarm", vmin=-1, vmax=1, center=0, ax=ax)
     ax.set_title("Correlation Heatmap")
-    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     fig.savefig(output_dir / "07_correlation_heatmap.png", dpi=200)
     plt.close(fig)
 
 
-def plot_boxplots_by_label(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+def plot_boxplots_by_label(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, axes = plt.subplots(4, 2, figsize=(14, 18))
     axes = axes.flatten()
-    label_zero = dataframe[dataframe["label"] == 0]
-    label_one = dataframe[dataframe["label"] == 1]
 
     for ax, column in zip(axes, EDA_CORE_RATIOS):
-        series_zero = clip_series_for_plot(label_zero[column])
-        series_one = clip_series_for_plot(label_one[column])
-        data = [series_zero.to_numpy(), series_one.to_numpy()]
-        ax.boxplot(data, labels=["label=0", "label=1"], showfliers=False)
+        plot_df = dataframe[[column, "label"]].dropna().copy()
+        plot_df[column] = clip_series_for_plot(plot_df[column]).reindex(plot_df.index)
+        plot_df = plot_df.dropna()
+        plot_df["label_str"] = plot_df["label"].astype(int).astype(str)
+        sns.boxplot(data=plot_df, x="label_str", y=column, showfliers=False, palette="coolwarm", ax=ax)
         ax.set_title(column)
         ax.grid(axis="y", alpha=0.25)
 
@@ -968,18 +990,29 @@ def plot_boxplots_by_label(dataframe: pd.DataFrame, output_dir: Path, plt) -> No
     plt.close(fig)
 
 
-def plot_histograms_core_ratios(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+def plot_histograms_core_ratios(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, axes = plt.subplots(4, 2, figsize=(14, 18))
     axes = axes.flatten()
     for ax, column in zip(axes, EDA_CORE_RATIOS):
-        series_zero = clip_series_for_plot(dataframe.loc[dataframe["label"] == 0, column])
-        series_one = clip_series_for_plot(dataframe.loc[dataframe["label"] == 1, column])
-        if not series_zero.empty:
-            ax.hist(series_zero, bins=30, alpha=0.55, label="label=0", color="#6baed6")
-        if not series_one.empty:
-            ax.hist(series_one, bins=30, alpha=0.55, label="label=1", color="#ef8a62")
+        plot_df = dataframe[[column, "label"]].dropna().copy()
+        plot_df[column] = clip_series_for_plot(plot_df[column]).reindex(plot_df.index)
+        plot_df = plot_df.dropna()
+        plot_df["label_str"] = plot_df["label"].astype(int).astype(str)
+        if not plot_df.empty:
+            sns.histplot(
+                data=plot_df,
+                x=column,
+                hue="label_str",
+                bins=30,
+                stat="count",
+                common_norm=False,
+                element="step",
+                fill=True,
+                alpha=0.35,
+                palette="coolwarm",
+                ax=ax,
+            )
         ax.set_title(column)
-        ax.legend()
         ax.grid(axis="y", alpha=0.25)
 
     fig.suptitle("Core Ratio Histograms", fontsize=16)
@@ -988,10 +1021,9 @@ def plot_histograms_core_ratios(dataframe: pd.DataFrame, output_dir: Path, plt) 
     plt.close(fig)
 
 
-def plot_scatter_pairs(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
+def plot_scatter_pairs(dataframe: pd.DataFrame, output_dir: Path, plt, sns) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     axes = axes.flatten()
-    color_map = {0: "#6baed6", 1: "#ef8a62"}
 
     for ax, (x_col, y_col) in zip(axes, EDA_SCATTER_PAIRS):
         plot_df = dataframe[[x_col, y_col, "label"]].dropna().copy()
@@ -1003,17 +1035,17 @@ def plot_scatter_pairs(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
         plot_df[x_col] = clip_series_for_plot(plot_df[x_col]).reindex(plot_df.index)
         plot_df[y_col] = clip_series_for_plot(plot_df[y_col]).reindex(plot_df.index)
         plot_df = plot_df.dropna()
-
-        for label_value in sorted(plot_df["label"].dropna().unique()):
-            label_slice = plot_df[plot_df["label"] == label_value]
-            ax.scatter(
-                label_slice[x_col],
-                label_slice[y_col],
-                s=14,
-                alpha=0.35,
-                color=color_map.get(int(label_value), "#999999"),
-                label=f"label={int(label_value)}",
-            )
+        plot_df["label_str"] = plot_df["label"].astype(int).astype(str)
+        sns.scatterplot(
+            data=plot_df,
+            x=x_col,
+            y=y_col,
+            hue="label_str",
+            palette="coolwarm",
+            s=28,
+            alpha=0.4,
+            ax=ax,
+        )
 
         ax.set_title(f"{x_col} vs {y_col}")
         ax.set_xlabel(x_col)
@@ -1028,8 +1060,8 @@ def plot_scatter_pairs(dataframe: pd.DataFrame, output_dir: Path, plt) -> None:
 
 
 def run_eda(csv_path: Path, eda_output_dir: Path) -> None:
-    plt, font_manager = require_matplotlib()
-    configure_plot_font(plt, font_manager)
+    plt, font_manager, sns = require_plot_libraries()
+    configure_plot_font(plt, font_manager, sns)
 
     print(f"EDA 입력 CSV: {csv_path}")
     print(f"EDA 저장 폴더: {eda_output_dir}")
@@ -1040,15 +1072,15 @@ def run_eda(csv_path: Path, eda_output_dir: Path) -> None:
     save_missing_zero_summary(dataframe, eda_output_dir)
     save_by_label_summary(dataframe, eda_output_dir)
 
-    plot_label_distribution(dataframe, eda_output_dir, plt)
-    plot_state_distribution(dataframe, eda_output_dir, plt)
-    plot_yearly_state_counts(dataframe, eda_output_dir, plt)
-    plot_yearly_label_counts(dataframe, eda_output_dir, plt)
-    plot_missing_zero_rates(dataframe, eda_output_dir, plt)
-    plot_correlation_heatmap(dataframe, eda_output_dir, plt)
-    plot_boxplots_by_label(dataframe, eda_output_dir, plt)
-    plot_histograms_core_ratios(dataframe, eda_output_dir, plt)
-    plot_scatter_pairs(dataframe, eda_output_dir, plt)
+    plot_label_distribution(dataframe, eda_output_dir, plt, sns)
+    plot_state_distribution(dataframe, eda_output_dir, plt, sns)
+    plot_yearly_state_counts(dataframe, eda_output_dir, plt, sns)
+    plot_yearly_label_counts(dataframe, eda_output_dir, plt, sns)
+    plot_missing_zero_rates(dataframe, eda_output_dir, plt, sns)
+    plot_correlation_heatmap(dataframe, eda_output_dir, plt, sns)
+    plot_boxplots_by_label(dataframe, eda_output_dir, plt, sns)
+    plot_histograms_core_ratios(dataframe, eda_output_dir, plt, sns)
+    plot_scatter_pairs(dataframe, eda_output_dir, plt, sns)
 
     print("EDA 요약 CSV 3개와 PNG 그래프 10개 저장이 완료되었습니다.")
 
