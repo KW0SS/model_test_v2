@@ -1,0 +1,9 @@
+﻿metric,value
+total_rows,22941
+unique_companies,2834
+year_min,2015
+year_max,2025
+state_count::정상기업,22500
+state_count::상폐기업,441
+label_count::0,22628
+label_count::1,313

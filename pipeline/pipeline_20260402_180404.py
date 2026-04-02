@@ -607,7 +607,22 @@ def process_listed_companies(writer: csv.DictWriter) -> int:
     return written_rows
 
 
-def process_delisted_companies(writer: csv.DictWriter, included_records: dict[str, DelistedRecord], excluded_codes: set[str]) -> int:
+def build_delisted_target_years(delisted_record: DelistedRecord, use_last_year: bool) -> dict[int, int]:
+    target_years = {
+        delisted_record.delisting_year - 2: 1,
+        delisted_record.delisting_year - 3: 0,
+    }
+    if use_last_year:
+        target_years[delisted_record.delisting_year - 1] = 1
+    return target_years
+
+
+def process_delisted_companies(
+    writer: csv.DictWriter,
+    included_records: dict[str, DelistedRecord],
+    excluded_codes: set[str],
+    use_last_year: bool = False,
+) -> int:
     written_rows = 0
     matched_companies = 0
 
@@ -626,10 +641,7 @@ def process_delisted_companies(writer: csv.DictWriter, included_records: dict[st
             continue
 
         matched_companies += 1
-        target_years = {
-            delisted_record.delisting_year - 2: 1,
-            delisted_record.delisting_year - 3: 0,
-        }
+        target_years = build_delisted_target_years(delisted_record, use_last_year)
 
         for year, label in sorted(target_years.items()):
             current = year_map.get(year)
@@ -679,6 +691,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="EDA 결과 저장 폴더입니다. 미지정 시 재무비율/eda_타임스탬프 를 사용합니다.",
     )
+    parser.add_argument(
+        "--use-last-year",
+        action="store_true",
+        help="상폐기업 데이터에 상폐연도 전년도 재무제표를 label=1로 추가 저장합니다.",
+    )
     args = parser.parse_args()
     if args.with_eda and args.eda_only:
         parser.error("--with-eda 와 --eda-only 는 동시에 사용할 수 없습니다.")
@@ -687,7 +704,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def generate_financial_ratio_csv() -> Path:
+def generate_financial_ratio_csv(use_last_year: bool = False) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     included_records, excluded_codes, total_delisted_rows = read_delisted_records()
@@ -697,6 +714,10 @@ def generate_financial_ratio_csv() -> Path:
     print(f"원본 상폐 CSV 행 수: {total_delisted_rows}")
     print(f"필터링으로 제외된 상폐 종목 수: {len(excluded_codes)}")
     print(f"계산 대상으로 남은 상폐 종목 수: {len(included_records)}")
+    if use_last_year:
+        print("상폐기업 라벨 규칙: 상폐연도-1과 상폐연도-2는 label=1, 상폐연도-3은 label=0")
+    else:
+        print("상폐기업 라벨 규칙: 상폐연도-2는 label=1, 상폐연도-3은 label=0")
     print(f"결과 저장 경로: {output_path}")
 
     with output_path.open("w", encoding="utf-8-sig", newline="") as output_file:
@@ -704,7 +725,12 @@ def generate_financial_ratio_csv() -> Path:
         writer.writeheader()
 
         listed_rows = process_listed_companies(writer)
-        delisted_rows = process_delisted_companies(writer, included_records, excluded_codes)
+        delisted_rows = process_delisted_companies(
+            writer,
+            included_records,
+            excluded_codes,
+            use_last_year=use_last_year,
+        )
 
     print(f"상장기업 행 수: {listed_rows}")
     print(f"상폐기업 행 수: {delisted_rows}")
@@ -1095,7 +1121,7 @@ def main() -> None:
             run_eda(input_csv, eda_output_dir)
             return
 
-        output_csv = generate_financial_ratio_csv()
+        output_csv = generate_financial_ratio_csv(use_last_year=args.use_last_year)
         if args.with_eda:
             eda_output_dir = build_eda_output_dir(args.eda_output_dir)
             run_eda(output_csv, eda_output_dir)
