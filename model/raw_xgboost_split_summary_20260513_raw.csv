@@ -1,0 +1,7 @@
+﻿split,rows,positive_labels,negative_labels,unique_groups
+train,4253,2002.0,2251.0,188.0
+valid,968,458.0,510.0,41.0
+test,856,388.0,468.0,41.0
+overlap_train_valid,0,,,
+overlap_train_test,0,,,
+overlap_valid_test,0,,,

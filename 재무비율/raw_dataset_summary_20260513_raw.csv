@@ -1,0 +1,21 @@
+﻿metric,value
+rows,6077
+unique_stock_codes,270
+skipped_files,0
+label_count::0,3229
+label_count::1,2848
+period_count::ANNUAL,1725
+period_count::H1,1446
+period_count::Q1,1456
+period_count::Q3,1450
+state_count::상장,3229
+state_count::상폐,2848
+industry_count::Communication Services,2707
+industry_count::Consumer Discretionary,769
+industry_count::Consumer Staples,155
+industry_count::Financials,38
+industry_count::Health Care,210
+industry_count::Industrials,1097
+industry_count::Information Technology,742
+industry_count::Materials,339
+industry_count::Real Estate,20
